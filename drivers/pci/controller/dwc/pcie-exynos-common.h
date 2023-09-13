@@ -166,6 +166,21 @@ struct power_stats {
 	u64	last_entry_ts;
 };
 
+#define LINK_STATS_AVG_SAMPLE_SIZE 50
+
+struct link_stats {
+	u32 link_down_irq_count;
+	u32 link_down_irq_count_reported;
+	u32 cmpl_timeout_irq_count;
+	u32 cmpl_timeout_irq_count_reported;
+	u32 link_up_failure_count;
+	u32 link_up_failure_count_reported;
+	u32 link_recovery_failure_count;
+	u32 link_recovery_failure_count_reported;
+	u32 pll_lock_time_avg;
+	u32 link_up_time_avg;
+};
+
 struct exynos_pcie_clks {
 	struct clk	*pcie_clks[10];
 	struct clk	*phy_clks[3];
@@ -220,19 +235,24 @@ struct exynos_pcie_ops {
 struct exynos_pcie {
 	struct dw_pcie		*pci;
 #if IS_ENABLED(CONFIG_GS_S2MPU)
-	struct s2mpu_info	*s2mpu;
-	struct pci_dev		*ep_pci_dev;
 	struct list_head	phys_mem_list;
 #endif
+	struct s2mpu_info	*s2mpu;
+	struct pci_dev		*ep_pci_dev;
 	void __iomem		*elbi_base;
 	void __iomem		*phy_base;
 	void __iomem		*sysreg_base;
 	void __iomem		*rc_dbi_base;
 	void __iomem		*phy_pcs_base;
 	void __iomem		*ia_base;
+	u32			*pma_regs;
 	u32			elbi_base_physical_addr;
 	u32			phy_base_physical_addr;
 	u32			ia_base_physical_addr;
+	u32			ep_l1ss_cap_off;
+	u32			ep_link_ctrl_off;
+	u32			ep_l1ss_ctrl1_off;
+	u32			ep_l1ss_ctrl2_off;
 	unsigned int		pci_cap[48];
 	unsigned int		pci_ext_cap[48];
 	struct regmap		*pmureg;
@@ -248,6 +268,7 @@ struct exynos_pcie {
 	int			l1ss_enable;
 	int			linkdown_cnt;
 	int			idle_ip_index;
+	int			separated_msi;
 	bool			use_msi;
 	bool			use_cache_coherency;
 	bool			use_sicd;
@@ -256,7 +277,11 @@ struct exynos_pcie {
 	bool			use_sysmmu;
 	bool			use_ia;
 	bool			use_l1ss;
+	bool			use_secure_atu;
 	bool			use_nclkoff_en;
+	bool                    cpl_timeout_recovery;
+	bool			sudden_linkdown;
+	bool			pma_regs_valid;
 	spinlock_t		conf_lock;		/* pcie config - link status change */
 	spinlock_t		reg_lock;		/* pcie config - reg_lock(reserved) */
 	spinlock_t		pcie_l1_exit_lock;	/* pcie l1.2 exit - ctrl_id_state */
@@ -286,6 +311,7 @@ struct exynos_pcie {
 	int			max_link_speed;
 	struct power_stats	link_up;
 	struct power_stats	link_down;
+	struct link_stats	link_stats;
 
 	struct pinctrl		*pcie_pinctrl;
 	struct pinctrl_state	*pin_state[MAX_PCIE_PIN_STATE];
@@ -308,6 +334,24 @@ struct exynos_pcie {
 
 	bool use_phy_isol_con;
 	int phy_control;
+	struct logbuffer *log;
+
+	bool pcie_must_resume;
+	int pcieon_sleep_enable_cnt;
+};
+
+#define PCIE_MAX_MSI_NUM	(8)
+#define PCIE_MAX_SEPA_IRQ_NUM	(5)
+#define PCIE_START_SEP_MSI_VEC	(1)
+#define PCIE_MSI_MAX_VEC_NUM	(32)
+#define PCIE_DOMAIN_MAX_IRQ	(256)
+
+struct separated_msi_vector {
+	int is_used;
+	int irq;
+	void *context;
+	irq_handler_t msi_irq_handler;
+	int flags;
 };
 
 #define PCIE_EXYNOS_OP_READ(base, type)						\

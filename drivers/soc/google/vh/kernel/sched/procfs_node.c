@@ -41,7 +41,7 @@ static void apply_uclamp_change(enum vendor_group group, enum uclamp_id clamp_id
 static struct uclamp_se uclamp_default[UCLAMP_CNT];
 unsigned int pmu_poll_time_ms = 10;
 bool pmu_poll_enabled;
-extern void pmu_poll_enable(void);
+extern int pmu_poll_enable(void);
 extern void pmu_poll_disable(void);
 
 #define MAX_PROC_SIZE 128
@@ -1263,6 +1263,7 @@ static ssize_t pmu_poll_enable_store(struct file *filp,
 {
 	bool enable;
 	char buf[MAX_PROC_SIZE];
+	int ret = 0;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1275,18 +1276,124 @@ static ssize_t pmu_poll_enable_store(struct file *filp,
 	if (kstrtobool(buf, &enable))
 		return -EINVAL;
 
-	if (pmu_poll_enabled == enable)
-		return count;
-
 	if (enable)
-		pmu_poll_enable();
+		ret = pmu_poll_enable();
 	else
 		pmu_poll_disable();
+
+	if (ret)
+		return ret;
 
 	return count;
 }
 
 PROC_OPS_RW(pmu_poll_enable);
+
+
+extern unsigned int sched_lib_cpu_freq_cached_val;
+
+static sched_lib_cpu_freq_cached_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%u\n", sched_lib_cpu_freq_cached_val);
+	return 0;
+}
+
+static ssize_t sched_lib_cpu_freq_cached_store(struct file *filp,
+					const char __user *ubuf,
+					size_t count, loff_t *pos)
+{
+	int dup_sched_lib_cpu_freq_cached_val = 0;
+	char buf[MAX_PROC_SIZE];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+
+	if (kstrtoint(buf, 10, &dup_sched_lib_cpu_freq_cached_val))
+		return -EINVAL;
+
+	sched_lib_cpu_freq_cached_val = dup_sched_lib_cpu_freq_cached_val;
+	return count;
+
+}
+
+PROC_OPS_RW(sched_lib_cpu_freq_cached);
+
+extern unsigned int sched_lib_freq_cpumask;
+static sched_lib_freq_cpumask_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", sched_lib_freq_cpumask);
+	return 0;
+}
+
+static ssize_t sched_lib_freq_cpumask_store(struct file *filp,
+							const char __user *ubuf,
+							size_t count, loff_t *pos)
+{
+	int dup_sched_lib_freq_cpumask = 0;
+	char buf[MAX_PROC_SIZE];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+
+	if (kstrtoint(buf, 10, &dup_sched_lib_freq_cpumask))
+		return -EINVAL;
+
+	sched_lib_freq_cpumask = dup_sched_lib_freq_cpumask;
+	return count;
+}
+
+PROC_OPS_RW(sched_lib_freq_cpumask);
+
+extern unsigned int sched_lib_affinity_val;
+static sched_lib_affinity_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", sched_lib_affinity_val);
+	return 0;
+}
+
+static ssize_t sched_lib_affinity_store(struct file *filp,
+							const char __user *ubuf,
+							size_t count, loff_t *pos)
+{
+	int dup_sched_lib_affinity_val = 0;
+	char buf[MAX_PROC_SIZE];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+
+	if (kstrtoint(buf, 10, &dup_sched_lib_affinity_val))
+		return -EINVAL;
+
+	sched_lib_affinity_val = dup_sched_lib_affinity_val;
+	return count;
+}
+
+PROC_OPS_RW(sched_lib_affinity);
+
+extern ssize_t sched_lib_name_store(struct file *filp,
+				const char __user *ubuffer, size_t count,
+				loff_t *ppos);
+extern sched_lib_name_show(struct seq_file *m, void *v);
+
+
+PROC_OPS_RW(sched_lib_name);
+
+
 
 struct pentry {
 	const char *name;
@@ -1423,6 +1530,11 @@ static struct pentry entries[] = {
 	PROC_ENTRY(prefer_idle_clear),
 	PROC_ENTRY(uclamp_fork_reset_set),
 	PROC_ENTRY(uclamp_fork_reset_clear),
+	// sched lib
+	PROC_ENTRY(sched_lib_cpu_freq_cached),
+	PROC_ENTRY(sched_lib_freq_cpumask),
+	PROC_ENTRY(sched_lib_affinity),
+	PROC_ENTRY(sched_lib_name),
 };
 
 

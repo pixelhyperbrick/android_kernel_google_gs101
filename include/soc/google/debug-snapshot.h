@@ -71,6 +71,7 @@ extern unsigned int dbg_snapshot_get_core_ehld_stat(unsigned int cpu);
 
 /* debug-snapshot-log functions */
 extern int dbg_snapshot_get_freq_idx(const char *name);
+extern void *dbg_snapshot_get_suspend_diag(void);
 
 #define dbg_snapshot_get_timestamp()	local_clock()
 extern void dbg_snapshot_task(int cpu, void *v_task);
@@ -333,6 +334,28 @@ enum dss_log_item_indx {
 	DSS_LOG_THERMAL_ID,
 	DSS_LOG_ACPM_ID,
 	DSS_LOG_PRINTK_ID,
+};
+
+enum dss_suspend_diag_item_index {
+	DSS_SUSPEND_SYNC_FILESYSTEMS_ID = 0,
+	DSS_SUSPEND_FREEZE_PROCESSES_ID,
+	DSS_SUSPEND_SUSPEND_ENTER_ID,
+	DSS_SUSPEND_DPM_PREPARE_ID,
+	DSS_SUSPEND_DPM_SUSPEND_ID,
+	DSS_SUSPEND_DPM_SUSPEND_LATE_ID,
+	DSS_SUSPEND_DPM_SUSPEND_NOIRQ_ID,
+	DSS_SUSPEND_CPU_OFF_ID,
+	DSS_SUSPEND_SYSCORE_SUSPEND_ID,
+	DSS_SUSPEND_MACHINE_SUSPEND_ID,
+	DSS_SUSPEND_SYSCORE_RESUME_ID,
+	DSS_SUSPEND_CPU_ON_ID,
+	DSS_SUSPEND_DPM_RESUME_NOIRQ_ID,
+	DSS_SUSPEND_DPM_RESUME_EARLY_ID,
+	DSS_SUSPEND_DPM_RESUME_ID,
+	DSS_SUSPEND_DPM_COMPLETE_ID,
+	DSS_SUSPEND_RESUME_CONSOLE_ID,
+	DSS_SUSPEND_THAW_PROCESSES_ID,
+	// up to 31
 };
 
 struct dbg_snapshot_helper_ops {

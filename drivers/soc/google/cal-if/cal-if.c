@@ -11,6 +11,8 @@
 #include <soc/google/exynos-bcm_dbg.h>
 #endif
 
+#include <trace/events/power.h>
+
 #include "pwrcal-env.h"
 #include "pwrcal-rae.h"
 #include "cmucal.h"
@@ -28,6 +30,8 @@
 #include "pmucal_powermode.h"
 
 #include "../acpm/acpm.h"
+
+extern s32 gs_chipid_get_dvfs_version(void);
 
 int (*exynos_cal_pd_bcm_sync)(unsigned int id, bool on);
 EXPORT_SYMBOL(exynos_cal_pd_bcm_sync);
@@ -256,18 +260,27 @@ EXPORT_SYMBOL_GPL(cal_pd_set_smc_id);
 
 int cal_pm_enter(int mode)
 {
+	char clock_name[32] = {0};
+	scnprintf(clock_name, 32, "CAL_PM_ENTER_%d", mode);
+	trace_clock_set_rate(clock_name, 1, raw_smp_processor_id());
 	return pmucal_system_enter(mode);
 }
 EXPORT_SYMBOL_GPL(cal_pm_enter);
 
 int cal_pm_exit(int mode)
 {
+	char clock_name[32] = {0};
+	scnprintf(clock_name, 32, "CAL_PM_ENTER_%d", mode);
+	trace_clock_set_rate(clock_name, 0, raw_smp_processor_id());
 	return pmucal_system_exit(mode);
 }
 EXPORT_SYMBOL_GPL(cal_pm_exit);
 
 int cal_pm_earlywakeup(int mode)
 {
+	char clock_name[32] = {0};
+	scnprintf(clock_name, 32, "CAL_PM_ENTER_%d", mode);
+	trace_clock_set_rate(clock_name, 0, raw_smp_processor_id());
 	return pmucal_system_earlywakeup(mode);
 }
 EXPORT_SYMBOL_GPL(cal_pm_earlywakeup);
@@ -311,10 +324,14 @@ EXPORT_SYMBOL_GPL(cal_cpu_status);
 int cal_cluster_enable(unsigned int cluster)
 {
 	int ret;
+	char clock_name[32] = {0};
 
 	spin_lock(&pmucal_cpu_lock);
 	ret = pmucal_cpu_cluster_enable(cluster);
 	spin_unlock(&pmucal_cpu_lock);
+
+	scnprintf(clock_name, 32, "CAL_CLUSTER_ENABLE_%u", cluster);
+	trace_clock_set_rate(clock_name, 1, raw_smp_processor_id());
 
 	return ret;
 }
@@ -323,10 +340,15 @@ EXPORT_SYMBOL_GPL(cal_cluster_enable);
 int cal_cluster_disable(unsigned int cluster)
 {
 	int ret;
+	char clock_name[32] = {0};
 
 	spin_lock(&pmucal_cpu_lock);
 	ret = pmucal_cpu_cluster_disable(cluster);
 	spin_unlock(&pmucal_cpu_lock);
+
+
+	scnprintf(clock_name, 32, "CAL_CLUSTER_ENABLE_%u", cluster);
+	trace_clock_set_rate(clock_name, 0, raw_smp_processor_id());
 
 	return ret;
 }
@@ -473,8 +495,14 @@ int cal_if_init(void *np)
 		return 0;
 
 	prop = of_get_property(np, "minmax_idx", &len);
-	if (prop)
+	if (prop) {
 		minmax_idx = be32_to_cpup(prop);
+	} else {
+		int dvfs_version = gs_chipid_get_dvfs_version();
+		if (dvfs_version < 0)
+			return dvfs_version;
+		minmax_idx = dvfs_version;
+	}
 
 	ect_parse_binary_header();
 

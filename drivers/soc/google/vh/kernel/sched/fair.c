@@ -14,23 +14,23 @@
 #include "../systrace.h"
 
 #if IS_ENABLED(CONFIG_PIXEL_EM)
-struct em_perf_domain **vendor_sched_cpu_to_em_pd;
-EXPORT_SYMBOL_GPL(vendor_sched_cpu_to_em_pd);
+#include "../../include/pixel_em.h"
+struct pixel_em_profile **vendor_sched_pixel_em_profile;
+EXPORT_SYMBOL_GPL(vendor_sched_pixel_em_profile);
 #endif
 
 extern unsigned int vendor_sched_uclamp_threshold;
 extern unsigned int vendor_sched_util_post_init_scale;
 extern bool vendor_sched_npi_packing;
-extern bool vendor_sched_reduce_prefer_idle;
-
-static struct vendor_group_property vg[VG_MAX];
 
 unsigned int sched_capacity_margin[CPU_NUM] = {
 			[0 ... CPU_NUM-1] = DEF_UTIL_THRESHOLD };
-static unsigned long scale_freq[CPU_NUM] = {
-			[0 ... CPU_NUM-1] = SCHED_CAPACITY_SCALE };
+
+struct vendor_group_property vg[VG_MAX];
 
 extern struct vendor_group_list vendor_group_list[VG_MAX];
+
+extern inline unsigned int uclamp_none(enum uclamp_id clamp_id);
 
 unsigned long schedutil_cpu_util_pixel_mod(int cpu, unsigned long util_cfs,
 				 unsigned long max, enum schedutil_type type,
@@ -45,6 +45,30 @@ unsigned int map_scaling_freq(int cpu, unsigned int freq);
  * Any change for these functions in upstream GKI would require extensive review
  * to make proper adjustment in vendor hook.
  */
+
+static void attach_task(struct rq *rq, struct task_struct *p)
+{
+	lockdep_assert_held(&rq->lock);
+
+	BUG_ON(task_rq(p) != rq);
+	activate_task(rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(rq, p, 0);
+}
+
+/*
+ * attach_one_task() -- attaches the task returned from detach_one_task() to
+ * its new rq.
+ */
+static void attach_one_task(struct rq *rq, struct task_struct *p)
+{
+	struct rq_flags rf;
+
+	rq_lock(rq, &rf);
+	update_rq_clock(rq);
+	attach_task(rq, p);
+	rq_unlock(rq, &rf);
+}
+
 #if IS_ENABLED(CONFIG_FAIR_GROUP_SCHED)
 static inline struct task_struct *task_of(struct sched_entity *se)
 {
@@ -92,23 +116,6 @@ static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
 }
 #endif
 
-unsigned long task_util(struct task_struct *p)
-{
-	return READ_ONCE(p->se.avg.util_avg);
-}
-
-static inline unsigned long _task_util_est(struct task_struct *p)
-{
-	struct util_est ue = READ_ONCE(p->se.avg.util_est);
-
-	return max(ue.ewma, (ue.enqueued & ~UTIL_AVG_UNCHANGED));
-}
-
-static inline unsigned long task_util_est(struct task_struct *p)
-{
-	return max(task_util(p), _task_util_est(p));
-}
-
 #if IS_ENABLED(CONFIG_UCLAMP_TASK)
 static inline unsigned long uclamp_task_util(struct task_struct *p)
 {
@@ -132,7 +139,7 @@ static unsigned long capacity_curr_of(int cpu)
 {
 	unsigned long max_cap = cpu_rq(cpu)->cpu_capacity_orig;
 
-	return cap_scale(max_cap, scale_freq[cpu]);
+	return cap_scale(max_cap, per_cpu(freq_scale, cpu));
 }
 
 /* Runqueue only has SCHED_IDLE tasks enqueued */
@@ -254,23 +261,6 @@ static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
 /*
  * This part of code is new for this kernel, which are mostly helper functions.
  */
-
-static inline bool get_prefer_idle(struct task_struct *p)
-{
-	// For group based prefer_idle vote, filter our smaller or low prio or
-	// have throttled uclamp.max settings
-	// Ignore all checks, if the prefer_idle is from per-task API.
-	if (vendor_sched_reduce_prefer_idle && !get_vendor_task_struct(p)->uclamp_fork_reset)
-		return (vg[get_vendor_group(p)].prefer_idle &&
-			task_util_est(p) >= vendor_sched_uclamp_threshold &&
-			p->prio <= DEFAULT_PRIO &&
-			uclamp_eff_value(p, UCLAMP_MAX) == SCHED_CAPACITY_SCALE) ||
-			get_vendor_task_struct(p)->prefer_idle;
-	else
-		return vg[get_vendor_task_struct(p)->group].prefer_idle ||
-		       get_vendor_task_struct(p)->prefer_idle;
-}
-
 bool get_prefer_high_cap(struct task_struct *p)
 {
 	return vg[get_vendor_group(p)].prefer_high_cap;
@@ -579,9 +569,32 @@ static inline unsigned long em_cpu_energy_pixel_mod(struct em_perf_domain *pd,
 
 #if IS_ENABLED(CONFIG_PIXEL_EM)
 	{
-		struct em_perf_domain **cpu_to_em_pd = READ_ONCE(vendor_sched_cpu_to_em_pd);
-		if (cpu_to_em_pd)
-			pd = cpu_to_em_pd[cpu];
+		struct pixel_em_profile **profile_ptr_snapshot;
+		profile_ptr_snapshot = READ_ONCE(vendor_sched_pixel_em_profile);
+		if (profile_ptr_snapshot) {
+			struct pixel_em_profile *profile = READ_ONCE(*profile_ptr_snapshot);
+			if (profile) {
+				struct pixel_em_cluster *cluster = profile->cpu_to_cluster[cpu];
+				struct pixel_em_opp *max_opp;
+				struct pixel_em_opp *opp;
+
+				max_opp = &cluster->opps[cluster->num_opps - 1];
+
+				freq = map_util_freq_pixel_mod(max_util,
+							       max_opp->freq,
+							       max_opp->capacity,
+							       cpu);
+				freq = map_scaling_freq(cpu, freq);
+
+				for (i = 0; i < cluster->num_opps; i++) {
+					opp = &cluster->opps[i];
+					if (opp->freq >= freq)
+						break;
+				}
+
+				return opp->cost * sum_util / max_opp->capacity;
+			}
+		}
 	}
 #endif
 
@@ -795,9 +808,6 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, bool s
 						 spare_cap, task_fits, false);
 #endif
 
-			if (prefer_fit && !task_fits)
-				continue;
-
 			if (prefer_idle) {
 				/*
 				 * For a cluster, the energy computation result will be the same for
@@ -841,13 +851,21 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, bool s
 				if (prefer_high_cap && i < HIGH_CAPACITY_CPU)
 					continue;
 
+				/*
+				 * Make srue prefer_fit task could find a candidate in high capacity
+				 * clusters.
+				 */
 #if IS_ENABLED(CONFIG_USE_GROUP_THROTTLE)
-				if (group_overutilize || cpu_overutilized(util, capacity, i))
+				if (!prefer_fit &&
+				    (group_overutilize || cpu_overutilized(util, capacity, i)))
 					continue;
 #else
-				if (cpu_overutilized(util, capacity, i))
+				if (!prefer_fit && cpu_overutilized(util, capacity, i))
 					continue;
 #endif
+
+				if (prefer_fit && !task_fits)
+					continue;
 
 				/* find max spare capacity cpu, used as backup */
 				if (spare_cap > target_max_spare_cap) {
@@ -855,9 +873,15 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, bool s
 					cpumask_clear(&max_spare_cap);
 					cpumask_set_cpu(i, &max_spare_cap);
 				} else if (spare_cap == target_max_spare_cap) {
+					/*
+					 * When spare capacity is the same, clear the choice
+					 * randomly based on task_util.
+					 */
+					if ((task_util_est(p) % 2))
+							cpumask_clear(&max_spare_cap);
 					cpumask_set_cpu(i, &max_spare_cap);
 				}
-			} else {/* Below path is for non-prefer idle case*/
+			} else { /* Below path is for non-prefer idle case */
 #if IS_ENABLED(CONFIG_USE_GROUP_THROTTLE)
 				if (group_overutilize || cpu_overutilized(util, capacity, i))
 					continue;
@@ -955,18 +979,36 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, bool s
 	}
 
 	/* Assign candidates based on search order. */
-	if (!cpumask_empty(&idle_fit)) {
-		cpumask_copy(&candidates, &idle_fit);
-	} else if (!cpumask_empty(&idle_unfit)) {
-		cpumask_copy(&candidates, &idle_unfit);
-	} else if (!cpumask_empty(&unimportant_fit)) {
-		cpumask_copy(&candidates, &unimportant_fit);
-	} else if (!cpumask_empty(&unimportant_unfit)) {
-		cpumask_copy(&candidates, &unimportant_unfit);
-	} else if (!cpumask_empty(&packing)) {
-		cpumask_copy(&candidates, &packing);
-	} else if (!cpumask_empty(&max_spare_cap)) {
-		cpumask_copy(&candidates, &max_spare_cap);
+	if (prefer_fit) {
+		if (!cpumask_empty(&idle_fit)) {
+			cpumask_copy(&candidates, &idle_fit);
+		} else if (!cpumask_empty(&unimportant_fit)) {
+			cpumask_copy(&candidates, &unimportant_fit);
+		} else if (!cpumask_empty(&max_spare_cap)) {
+			cpumask_copy(&candidates, &max_spare_cap);
+		} else if (!cpumask_empty(&idle_unfit)) {
+			/* Assign biggest cpu core found for unfit case. */
+			cpumask_set_cpu(cpumask_last(&idle_unfit), &candidates);
+		} else if (!cpumask_empty(&unimportant_unfit)) {
+			/* Assign biggest cpu core found for unfit case. */
+			cpumask_set_cpu(cpumask_last(&unimportant_unfit), &candidates);
+		}
+	} else {
+		if (!cpumask_empty(&idle_fit)) {
+			cpumask_copy(&candidates, &idle_fit);
+		} else if (!cpumask_empty(&idle_unfit)) {
+			/* Assign biggest cpu core found for unfit case. */
+			cpumask_set_cpu(cpumask_last(&idle_unfit), &candidates);
+		} else if (!cpumask_empty(&unimportant_fit)) {
+			cpumask_copy(&candidates, &unimportant_fit);
+		} else if (!cpumask_empty(&unimportant_unfit)) {
+			/* Assign biggest cpu core found for unfit case. */
+			cpumask_set_cpu(cpumask_last(&unimportant_unfit), &candidates);
+		} else if (!cpumask_empty(&packing)) {
+			cpumask_copy(&candidates, &packing);
+		} else if (!cpumask_empty(&max_spare_cap)) {
+			cpumask_copy(&candidates, &max_spare_cap);
+		}
 	}
 
 	weight = cpumask_weight(&candidates);
@@ -1022,15 +1064,37 @@ out:
 	return best_energy_cpu;
 }
 
+#if IS_ENABLED(CONFIG_PIXEL_EM)
 void vh_arch_set_freq_scale_pixel_mod(void *data, const struct cpumask *cpus,
 				      unsigned long freq,
 				      unsigned long max, unsigned long *scale)
 {
 	int i;
+	struct pixel_em_profile **profile_ptr_snapshot;
+	profile_ptr_snapshot = READ_ONCE(vendor_sched_pixel_em_profile);
+	if (profile_ptr_snapshot) {
+		struct pixel_em_profile *profile = READ_ONCE(*profile_ptr_snapshot);
+		if (profile) {
+			struct pixel_em_cluster *cluster;
+			struct pixel_em_opp *max_opp;
+			struct pixel_em_opp *opp;
 
-	for_each_cpu(i, cpus)
-		scale_freq[i] = *scale;
+			cluster = profile->cpu_to_cluster[cpumask_first(cpus)];
+			max_opp = &cluster->opps[cluster->num_opps - 1];
+
+			for (i = 0; i < cluster->num_opps; i++) {
+				opp = &cluster->opps[i];
+				if (opp->freq >= freq)
+					break;
+			}
+
+			*scale = (opp->capacity << SCHED_CAPACITY_SHIFT) /
+				  max_opp->capacity;
+		}
+	}
 }
+EXPORT_SYMBOL_GPL(vh_arch_set_freq_scale_pixel_mod);
+#endif
 
 void rvh_set_iowait_pixel_mod(void *data, struct task_struct *p, int *should_iowait_boost)
 {
@@ -1063,7 +1127,7 @@ uclamp_tg_restrict_pixel_mod(struct task_struct *p, enum uclamp_id clamp_id)
 {
 	struct uclamp_se uc_req = p->uclamp_req[clamp_id];
 	struct vendor_task_struct *vp = get_vendor_task_struct(p);
-
+	struct vendor_binder_task_struct *vbinder = get_vendor_binder_task_struct(p);
 
 #ifdef CONFIG_UCLAMP_TASK_GROUP
 	unsigned int tg_min, tg_max, vnd_min, vnd_max, value;
@@ -1077,6 +1141,10 @@ uclamp_tg_restrict_pixel_mod(struct task_struct *p, enum uclamp_id clamp_id)
 
 	value = uc_req.value;
 	value = clamp(value, max(tg_min, vnd_min),  min(tg_max, vnd_max));
+
+	// Inherited uclamp restriction
+	if (vbinder->active)
+		value = clamp(value, vbinder->uclamp[UCLAMP_MIN], vbinder->uclamp[UCLAMP_MAX]);
 
 	// For uclamp min, if task has a valid per-task setting that is lower than or equal to its
 	// group value, increase the final uclamp value by 1. This would have effect only on
@@ -1333,14 +1401,21 @@ void vh_sched_setscheduler_uclamp_pixel_mod(void *data, struct task_struct *tsk,
 void vh_dup_task_struct_pixel_mod(void *data, struct task_struct *tsk, struct task_struct *orig)
 {
 	struct vendor_task_struct *v_tsk, *v_orig;
+	struct vendor_binder_task_struct *vbinder;
 
 	v_tsk = get_vendor_task_struct(tsk);
 	v_orig = get_vendor_task_struct(orig);
+	vbinder = get_vendor_binder_task_struct(tsk);
 	v_tsk->group = v_orig->group;
 	v_tsk->prefer_idle = false;
 	INIT_LIST_HEAD(&v_tsk->node);
 	raw_spin_lock_init(&v_tsk->lock);
 	v_tsk->queued_to_list = false;
+
+	vbinder->uclamp[UCLAMP_MIN] = uclamp_none(UCLAMP_MIN);
+	vbinder->uclamp[UCLAMP_MAX] = uclamp_none(UCLAMP_MAX);
+	vbinder->prefer_idle = false;
+	vbinder->active = false;
 }
 
 void rvh_cpumask_any_and_distribute(void *data, struct task_struct *p,
@@ -1422,3 +1497,184 @@ out:
 					prev_cpu, *target_cpu);
 }
 
+static struct task_struct *detach_important_task(struct rq *src_rq, int dst_cpu)
+{
+	struct task_struct *p = NULL, *best_task = NULL, *backup = NULL,
+		*backup_ui = NULL, *backup_unfit = NULL;
+
+	lockdep_assert_held(&src_rq->lock);
+
+	rcu_read_lock();
+
+	list_for_each_entry_reverse(p, &src_rq->cfs_tasks, se.group_node) {
+		struct vendor_task_struct *vp = get_vendor_task_struct(p);
+		bool is_ui = false, is_boost = false;
+
+		if (!cpumask_test_cpu(dst_cpu, p->cpus_ptr))
+			continue;
+
+		if (task_running(src_rq, p))
+			continue;
+
+		if (!get_prefer_idle(p))
+			continue;
+
+		if (vp && vp->uclamp_fork_reset)
+			is_ui = true;
+		else if (uclamp_eff_value(p, UCLAMP_MIN) > 0)
+			is_boost = true;
+
+		if (!is_ui && !is_boost)
+			continue;
+
+		if (task_fits_capacity(p, dst_cpu, false)) {
+			if (!task_fits_capacity(p, src_rq->cpu, false)) {
+				// if task is fit for new cpu but not old cpu
+				// stop if we found an ADPF UI task
+				// use it as backup if we found a boost task
+				if (is_ui) {
+					best_task = p;
+					break;
+				}
+
+				backup = p;
+			} else {
+				if (is_ui) {
+					backup_ui = p;
+					continue;
+				}
+
+				if (!backup)
+					backup = p;
+			}
+		} else {
+			// if new idle is not capable, use it as backup but not for UI task.
+			if (!is_ui)
+				backup_unfit = p;
+		}
+
+	}
+
+	if (best_task)
+		p = best_task;
+	else if (backup_ui)
+		p = backup_ui;
+	else if (backup)
+		p = backup;
+	else if (backup_unfit)
+		p = backup_unfit;
+	else
+		p = NULL;
+
+	if (p) {
+		/* detach_task */
+		deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+		set_task_cpu(p, dst_cpu);
+
+		if (backup_unfit)
+			cpu_rq(dst_cpu)->misfit_task_load = p->se.avg.load_avg;
+		else
+			cpu_rq(dst_cpu)->misfit_task_load = 0;
+	}
+
+	rcu_read_unlock();
+	return p;
+}
+
+/*
+ * In our newidle_balance, We ignore update next_interval, which could lead to
+ * the next tick might being triggered prematurely. but that should be fine since
+ * this is should not be happening often enough.
+ */
+void sched_newidle_balance_pixel_mod(void *data, struct rq *this_rq, struct rq_flags *rf,
+		int *pulled_task, int *done)
+{
+	int cpu;
+	struct rq *src_rq;
+	struct task_struct *p = NULL;
+	struct rq_flags src_rf;
+	int this_cpu = this_rq->cpu;
+
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	this_rq->idle_stamp = rq_clock(this_rq);
+
+	/*
+	 * Do not pull tasks towards !active CPUs...
+	 */
+	if (!cpu_active(this_cpu))
+		return;
+
+	/*
+	 * This is OK, because current is on_cpu, which avoids it being picked
+	 * for load-balance and preemption/IRQs are still disabled avoiding
+	 * further scheduler activity on it and we're being very careful to
+	 * re-start the picking loop.
+	 */
+	rq_unpin_lock(this_rq, rf);
+	raw_spin_unlock(&this_rq->lock);
+
+	this_cpu = this_rq->cpu;
+	for_each_cpu(cpu, cpu_active_mask) {
+		int cpu_importnace = READ_ONCE(cpu_rq(cpu)->uclamp[UCLAMP_MIN].value) +
+			READ_ONCE(cpu_rq(cpu)->uclamp[UCLAMP_MAX].value);
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->active_balance) {
+			rq_unlock_irqrestore(src_rq, &src_rf);
+			continue;
+		}
+
+		if (src_rq->nr_running <= 1) {
+			rq_unlock_irqrestore(src_rq, &src_rf);
+			continue;
+		}
+
+		if (cpu_importnace <= DEFAULT_IMPRATANCE_THRESHOLD || !src_rq->cfs.nr_running) {
+			rq_unlock_irqrestore(src_rq, &src_rf);
+			continue;
+		}
+
+		p = detach_important_task(src_rq, this_cpu);
+
+		rq_unlock_irqrestore(src_rq, &src_rf);
+
+		if (p) {
+			attach_one_task(this_rq, p);
+			break;
+		}
+	}
+
+	raw_spin_lock(&this_rq->lock);
+	/*
+	 * While browsing the domains, we released the rq lock, a task could
+	 * have been enqueued in the meantime. Since we're not going idle,
+	 * pretend we pulled a task.
+	 */
+	if (this_rq->cfs.h_nr_running && !*pulled_task)
+		*pulled_task = 1;
+
+	/* Is there a task of a high priority class? */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+		*pulled_task = -1;
+
+	if (*pulled_task)
+		this_rq->idle_stamp = 0;
+
+	if (*pulled_task != 0) {
+		*done = 1;
+		/* TODO: need implement update_blocked_averages */
+	}
+
+	rq_repin_lock(this_rq, rf);
+
+	return;
+}

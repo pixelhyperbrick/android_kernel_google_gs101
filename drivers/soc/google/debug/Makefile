@@ -2,6 +2,8 @@
 #  Makefile for Debug
 #
 
+ccflags-y := -DDYNAMIC_DEBUG_MODULE
+
 obj-$(CONFIG_DEBUG_SNAPSHOT) 		:= dss.o
 dss-y 					+= debug-snapshot.o \
 						debug-snapshot-log.o\
@@ -20,7 +22,9 @@ obj-$(CONFIG_EXYNOS_DEBUG_TEST)		+= exynos-debug-test.o
 
 obj-$(CONFIG_PIXEL_DEBUG_TEST)		+= pixel-debug-test.o
 
-obj-$(CONFIG_EXYNOS_ITMON) 		+= gs101-itmon.o
+obj-$(CONFIG_EXYNOS_ITMON) 		+= itmon.o
+itmon-$(CONFIG_SOC_GS101) 		+= gs101-itmon.o
+itmon-$(CONFIG_SOC_GS201) 		+= gs201-itmon.o
 
 obj-$(CONFIG_EXYNOS_CORESIGHT)		+= exynos-coresight.o
 
@@ -35,3 +39,5 @@ obj-$(CONFIG_EXYNOS_ADV_TRACER_S2D)	+= exynos-adv-tracer-s2d.o
 obj-$(CONFIG_PIXEL_BOOT_METRICS)	+= pixel-boot-metrics.o
 
 obj-$(CONFIG_GS_SJTAG)			+= sjtag-driver.o
+
+obj-$(CONFIG_ETM2DRAM)			+= etm2dram.o

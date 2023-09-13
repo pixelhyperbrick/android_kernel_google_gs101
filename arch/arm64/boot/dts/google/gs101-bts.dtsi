@@ -10,7 +10,7 @@
  *
  */
 
-#include <dt-bindings/soc/google/gs101-bts.h>
+#include <dt-bindings/soc/google/gs-bts.h>
 
 / {
 	exynos-bts {
@@ -46,6 +46,8 @@
 			    "mfc_uhd_enc60";
 
 		rt-names = "DECON0",
+			   "DECON1",
+			   "DECON2",
 			   "csi",
 			   "ipp",
 			   "g3aa";
